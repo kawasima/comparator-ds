@@ -2,13 +2,15 @@ package net.unit8.teslogger.comparator;
 
 import org.apache.commons.dbcp2.BasicDataSourceFactory;
 import org.h2.Driver;
-import org.h2.jdbcx.JdbcDataSourceFactory;
 import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Test;
 
 import javax.sql.DataSource;
-import java.sql.*;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.SQLException;
+import java.sql.Statement;
 import java.util.Properties;
 
 /**

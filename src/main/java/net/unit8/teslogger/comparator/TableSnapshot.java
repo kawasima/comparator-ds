@@ -20,7 +20,7 @@ public class TableSnapshot {
     private Map<String, List<Column>> tableDefs = new HashMap<String, List<Column>>();
     private long BULK_COUNT = 1000L;
 
-    private long version = 0L;
+    private Versioning versioning = new Versioning();
 
     public void take(String tableName) {
         Connection connection = null;
@@ -65,6 +65,15 @@ public class TableSnapshot {
 
         return columns;
     }
+
+    private void dropTable(String tableName, long version) throws SQLException {
+        Statement stmt = snapshotConnection.createStatement();
+        try {
+            stmt.executeUpdate("DROP TABLE " + tableName);
+        } finally {
+            stmt.close();
+        }
+    }
     public void createTable(Connection conn, String tableName) throws SQLException {
         List<Column> columns = tableDefs.get(tableName);
         if (columns == null) {
@@ -72,10 +81,11 @@ public class TableSnapshot {
         }
 
         Statement stmt = snapshotConnection.createStatement();
+
         try {
             StringBuilder sql = new StringBuilder();
             sql.append("CREATE TABLE ")
-                    .append(tableName)
+                    .append(versioningTableName(tableName, versioning))
                     .append(" (");
             for (Column column : columns) {
                 sql.append("\n")
@@ -113,16 +123,41 @@ public class TableSnapshot {
 
     }
 
-    public DataSource getDataSource() {
-        return dataSource;
+    private String versioningTableName(String tableName, long version) {
+        return tableName + "_" + version;
+    }
+    public void diff(String tableName, long version1, long version2) {
+        Statement stmt = null;
+        try {
+            stmt = snapshotConnection.createStatement();
+            ResultSet rs = stmt.executeQuery("SELECT 'BEFORE' AS _STATUS, T1.* " +
+                "FROM (SELECT * FROM "  + versioningTableName(tableName, version1) +
+                " MINUS SELECT * FROM " + versioningTableName(tableName, version2) + ") T1 " +
+                " UNION ALL " +
+                "SELECT 'AFTER' AS _STATUS, T2.* " +
+                "FROM (SELECT * FROM "  + versioningTableName(tableName, version2) +
+                " MINUS SELECT * FROM " + versioningTableName(tableName, version1) + ") T2 ");
+            List<Column> columns = tableDefs.get(tableName);
+            while(rs.next()) {
+                for (Column column : columns) {
+                    System.out.println(rs.getString(column.getName()));
+                }
+            }
+        } catch (SQLException ex) {
+            throw new IllegalStateException(ex);
+        } finally {
+            if (stmt != null) {
+                try {
+                    stmt.close();
+                } catch(SQLException ex) {
+                    throw new IllegalStateException(ex);
+                }
+            }
+        }
     }
 
     public void setDataSource(DataSource dataSource) {
         this.dataSource = dataSource;
-    }
-
-    public Connection getSnapshotConnection() {
-        return snapshotConnection;
     }
 
     public void setSnapshotConnection(Connection snapshotConnection) {
