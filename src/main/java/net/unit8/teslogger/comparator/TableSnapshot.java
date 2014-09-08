@@ -1,5 +1,6 @@
 package net.unit8.teslogger.comparator;
 
+import net.arnx.jsonic.JSON;
 import org.apache.commons.lang3.StringUtils;
 import org.h2.table.Column;
 import org.h2.value.DataType;
@@ -20,33 +21,25 @@ public class TableSnapshot {
     private Map<String, List<Column>> tableDefs = new HashMap<String, List<Column>>();
     private long BULK_COUNT = 1000L;
 
-    private Versioning versioning = new Versioning();
+    private Versioning versioning;
 
     public void take(String tableName) {
-        Connection connection = null;
-        try {
-            connection = dataSource.getConnection();
-            createTable(connection, tableName);
-
+        try (Connection conn = dataSource.getConnection()) {
+            if (versioning == null) {
+                versioning = new Versioning(snapshotConnection);
+            }
+            createTable(conn, tableName);
+            copyData(conn, tableName);
         } catch (SQLException ex) {
             throw new IllegalStateException(ex);
-        } finally {
-            if (connection != null) {
-                try {
-                    connection.close();
-                } catch(SQLException ex) {
-                    throw new IllegalStateException(ex);
-                }
-            }
         }
     }
 
     private List<Column> readMetadata(DatabaseMetaData md, String tableName) throws SQLException {
         List<Column> columns = new ArrayList<Column>();
-        ResultSet rs = md.getColumns(null, null, tableName.toUpperCase(), "%");
-        try {
-            while(rs.next()) {
 
+        try (ResultSet rs = md.getColumns(null, null, tableName.toUpperCase(), "%")) {
+            while(rs.next()) {
                 Column column = new Column(
                         rs.getString("COLUMN_NAME"),
                         DataType.convertSQLTypeToValueType(rs.getInt("DATA_TYPE")),
@@ -59,19 +52,26 @@ public class TableSnapshot {
                 columns.add(column);
             }
             tableDefs.put(tableName, columns);
-        } finally {
-            rs.close();
+        }
+
+        try (ResultSet rs = md.getPrimaryKeys(null, null, tableName.toUpperCase())) {
+            while(rs.next()) {
+                String pkColumn = rs.getString("COLUMN_NAME");
+                for(Column column : columns) {
+                    if (column.getName().equals(pkColumn)) {
+                        column.setPrimaryKey(true);
+                        break;
+                    }
+                }
+            }
         }
 
         return columns;
     }
 
     private void dropTable(String tableName, long version) throws SQLException {
-        Statement stmt = snapshotConnection.createStatement();
-        try {
+        try (Statement stmt = snapshotConnection.createStatement()) {
             stmt.executeUpdate("DROP TABLE " + tableName);
-        } finally {
-            stmt.close();
         }
     }
     public void createTable(Connection conn, String tableName) throws SQLException {
@@ -80,12 +80,10 @@ public class TableSnapshot {
             columns = readMetadata(conn.getMetaData(), tableName);
         }
 
-        Statement stmt = snapshotConnection.createStatement();
-
-        try {
+        try (Statement stmt = snapshotConnection.createStatement()) {
             StringBuilder sql = new StringBuilder();
             sql.append("CREATE TABLE ")
-                    .append(versioningTableName(tableName, versioning))
+                    .append(versioning.getNextVersion(tableName))
                     .append(" (");
             for (Column column : columns) {
                 sql.append("\n")
@@ -94,65 +92,83 @@ public class TableSnapshot {
             }
             sql.append(")");
             stmt.executeUpdate(sql.toString());
-        } finally {
-            stmt.close();
         }
     }
 
     public void copyData(Connection conn, String tableName) throws SQLException {
-        Statement stmt = conn.createStatement();
-        try {
-            PreparedStatement snapshotStmt = snapshotConnection.prepareStatement(
-                    "INSERT INTO " + tableName + "(" + StringUtils.repeat("?", ",", 3) + ")");
-            ResultSet rs = stmt.executeQuery("SELECT * FROM " + tableName);
-            int batchCount = 0;
-            while(rs.next()) {
-                int i = 1;
-                for(Column column : tableDefs.get(tableName)) {
-                    snapshotStmt.setObject(i++, rs.getObject(column.getName()));
-                }
-                snapshotStmt.addBatch();
+        try (Statement stmt = conn.createStatement();
+             ResultSet rs = stmt.executeQuery("SELECT * FROM " + tableName)) {
 
-                if (batchCount >= BULK_COUNT) {
-                    snapshotStmt.executeUpdate();
+            String sql = "INSERT INTO " + versioning.getCurrentVersion(tableName)
+                    + " VALUES(" + StringUtils.repeat("?", ",", rs.getMetaData().getColumnCount()) + ")";
+
+            try (PreparedStatement snapshotStmt = snapshotConnection.prepareStatement(sql)) {
+                int batchCount = 1;
+                while(rs.next()) {
+                    int i = 1;
+                    for(Column column : tableDefs.get(tableName)) {
+                        snapshotStmt.setObject(i++, rs.getObject(column.getName()));
+                    }
+                    snapshotStmt.addBatch();
+
+                    if (batchCount >= BULK_COUNT) {
+                        snapshotStmt.executeBatch();
+                    }
                 }
+                snapshotStmt.executeBatch();
             }
-        } finally {
-            stmt.close();
+            conn.commit();
         }
 
     }
 
-    private String versioningTableName(String tableName, long version) {
-        return tableName + "_" + version;
+    private Row findSameRow(List<Row> rows, Row targetRow) {
+        for(Row row : rows) {
+            if (row.same(targetRow))
+                return row;
+        }
+        return null;
     }
-    public void diff(String tableName, long version1, long version2) {
-        Statement stmt = null;
-        try {
-            stmt = snapshotConnection.createStatement();
-            ResultSet rs = stmt.executeQuery("SELECT 'BEFORE' AS _STATUS, T1.* " +
-                "FROM (SELECT * FROM "  + versioningTableName(tableName, version1) +
-                " MINUS SELECT * FROM " + versioningTableName(tableName, version2) + ") T1 " +
-                " UNION ALL " +
-                "SELECT 'AFTER' AS _STATUS, T2.* " +
-                "FROM (SELECT * FROM "  + versioningTableName(tableName, version2) +
-                " MINUS SELECT * FROM " + versioningTableName(tableName, version1) + ") T2 ");
-            List<Column> columns = tableDefs.get(tableName);
-            while(rs.next()) {
-                for (Column column : columns) {
-                    System.out.println(rs.getString(column.getName()));
+
+    public void diffFromPrevious(String tableName) {
+        try (Statement stmt = snapshotConnection.createStatement()) {
+            String addSql = "SELECT * FROM "  + versioning.getCurrentVersion(tableName) +
+                    " MINUS SELECT * FROM " + versioning.getPreviousVersion(tableName);
+
+            Diff diff = new Diff();
+
+            try (ResultSet rs = stmt.executeQuery(addSql)) {
+                List<Column> columns = tableDefs.get(tableName);
+                while(rs.next()) {
+                    Row row = new Row(columns);
+                    for (Column column : columns) {
+                        row.add(rs.getString(column.getName()));
+                    }
+                    diff.add(row);
                 }
             }
+
+            String delSql = "SELECT * FROM "  + versioning.getPreviousVersion(tableName) +
+                    " MINUS SELECT * FROM " + versioning.getCurrentVersion(tableName);
+            try (ResultSet rs = stmt.executeQuery(delSql)) {
+                List<Column> columns = tableDefs.get(tableName);
+                while(rs.next()) {
+                    Row row = new Row(columns);
+                    for (Column column : columns) {
+                        row.add(rs.getString(column.getName()));
+                    }
+                    Row addRow = findSameRow(diff.getAdd(), row);
+                    if (addRow != null) {
+                        diff.modify(addRow, row);
+                    } else {
+                        diff.delete(row);
+                    }
+                }
+            }
+            System.out.println(JSON.encode(diff));
+
         } catch (SQLException ex) {
             throw new IllegalStateException(ex);
-        } finally {
-            if (stmt != null) {
-                try {
-                    stmt.close();
-                } catch(SQLException ex) {
-                    throw new IllegalStateException(ex);
-                }
-            }
         }
     }
 

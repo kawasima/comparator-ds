@@ -13,7 +13,7 @@ import java.util.UUID;
 public class Versioning {
     private Connection conn;
 
-    public void init(Connection conn) throws SQLException {
+    public Versioning(Connection conn) throws SQLException {
         this.conn = conn;
         Statement stmt = null;
         try {
@@ -27,28 +27,53 @@ public class Versioning {
 
     }
 
-    public UUID getCurrentVersion(String tableName) {
+    public String getPreviousVersion(String tableName) {
         try (PreparedStatement stmt = conn.prepareStatement(
-                "SELECT id, table_name, MAX(created_at) FROM versions "
+                "SELECT id, table_name, created_at FROM versions "
                         + "WHERE table_name = ? "
-                        + "GROUP BY table_name")) {
+                        + "ORDER BY created_at DESC")) {
             stmt.setString(1, tableName);
             ResultSet rs = stmt.executeQuery();
-            rs.next();
-            return UUID.fromString(rs.getString("ID"));
+            if (rs.next() && rs.next()) {
+                return tableName + "_" + rs.getLong("ID");
+            } else {
+                throw new SQLException("No previous version.");
+            }
+
         } catch(SQLException ex) {
             throw new IllegalStateException(ex);
         }
     }
 
-    public UUID getNextVersion(String tableName) {
+    public String getCurrentVersion(String tableName) {
         try (PreparedStatement stmt = conn.prepareStatement(
-                "INSERT versions(id, table_name) "
-                        + "VALUES (RANDOM_UUID(), ?)")) {
+                "SELECT id, table_name, created_at FROM versions "
+                        + "WHERE table_name = ? "
+                        + "ORDER BY created_at DESC")) {
             stmt.setString(1, tableName);
             ResultSet rs = stmt.executeQuery();
-            rs.next();
-            return UUID.fromString(rs.getString("ID"));
+            if (rs.next()) {
+                return tableName + "_" + rs.getLong("ID");
+            } else {
+                throw new SQLException("No current version.");
+            }
+        } catch(SQLException ex) {
+            throw new IllegalStateException(ex);
+        }
+    }
+
+    public String getNextVersion(String tableName) {
+        try (PreparedStatement stmt = conn.prepareStatement(
+                "INSERT INTO versions(table_name) "
+                        + "VALUES (?)", Statement.RETURN_GENERATED_KEYS)) {
+            stmt.setString(1, tableName);
+            stmt.executeUpdate();
+            try (ResultSet rs = stmt.getGeneratedKeys()) {
+                rs.next();
+                return tableName + "_" + rs.getLong(1);
+            } finally {
+                conn.commit();
+            }
         } catch(SQLException ex) {
             throw new IllegalStateException(ex);
         }
