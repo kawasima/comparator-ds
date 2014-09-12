@@ -1,5 +1,7 @@
 package net.unit8.teslogger.comparator;
 
+import org.h2.table.Column;
+
 import java.util.ArrayList;
 import java.util.List;
 
@@ -7,16 +9,16 @@ import java.util.List;
  * @author kawasima
  */
 public class Diff {
-    private List<Row> add;
-    private List<Row> modify;
-    private List<Row> delete;
+    private List<String> headers = new ArrayList<>();
+    private List<Row> add    = new ArrayList<>();
+    private List<Row> modify = new ArrayList<>();
+    private List<Row> delete = new ArrayList<>();
 
-    public Diff() {
-        add = new ArrayList<>();
-        modify = new ArrayList<>();
-        delete = new ArrayList<>();
+    public Diff(List<Column> columns) {
+        for (Column column : columns) {
+            headers.add(column.getName());
+        }
     }
-
     public void add(Row row) {
         add.add(row);
     }
@@ -40,5 +42,9 @@ public class Diff {
 
     public List<Row> getDelete() {
         return delete;
+    }
+
+    public List<String> getHeaders() {
+        return headers;
     }
 }

@@ -1,6 +1,5 @@
 package net.unit8.teslogger.comparator;
 
-import net.arnx.jsonic.JSON;
 import org.apache.commons.lang3.StringUtils;
 import org.h2.table.Column;
 import org.h2.value.DataType;
@@ -8,9 +7,9 @@ import org.h2.value.DataType;
 import javax.sql.DataSource;
 import java.sql.*;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.TreeMap;
 
 /**
  * @author kawasima
@@ -18,16 +17,51 @@ import java.util.Map;
 public class TableSnapshot {
     private DataSource dataSource;
     private Connection snapshotConnection;
-    private Map<String, List<Column>> tableDefs = new HashMap<String, List<Column>>();
+    private Map<String, List<Column>> tableDefs = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
     private long BULK_COUNT = 1000L;
+    private TableNameNormalizer normalizer;
 
     private Versioning versioning;
 
+    public TableSnapshot(DataSource dataSource, String url) {
+        setDataSource(dataSource);
+        org.h2.Driver.load();
+        try (Connection conn = dataSource.getConnection()) {
+            snapshotConnection = DriverManager.getConnection(url);
+            DatabaseMetaData md = conn.getMetaData();
+            if (md.storesUpperCaseIdentifiers()) {
+                normalizer = new TableNameNormalizer() {
+                    @Override public String normalize(String tableName) {
+                        return tableName.toUpperCase();
+                    }
+                };
+            } else if (md.storesLowerCaseIdentifiers()) {
+                normalizer = new TableNameNormalizer() {
+                    @Override public String normalize(String tableName) {
+                        return tableName.toLowerCase();
+                    }
+                };
+            } else {
+                normalizer = new TableNameNormalizer() {
+                    @Override public String normalize(String tableName) {
+                        return tableName;
+                    }
+                };
+            }
+
+        } catch (SQLException e) {
+            throw new IllegalArgumentException(e);
+        }
+
+    }
+
     public void take(String tableName) {
+        tableName = normalizer.normalize(tableName);
         try (Connection conn = dataSource.getConnection()) {
             if (versioning == null) {
                 versioning = new Versioning(snapshotConnection);
             }
+
             createTable(conn, tableName);
             copyData(conn, tableName);
         } catch (SQLException ex) {
@@ -35,10 +69,24 @@ public class TableSnapshot {
         }
     }
 
+    public List<String> listCandidate() {
+        List<String> tables = new ArrayList<>();
+
+        try (Connection conn = dataSource.getConnection()) {
+            try (ResultSet rs = conn.getMetaData().getTables(null, null, "%", new String[]{"TABLE"})) {
+                while(rs.next()) {
+                    tables.add(rs.getString("TABLE_NAME"));
+                }
+            }
+            return tables;
+        } catch (SQLException ex) {
+            throw new IllegalStateException(ex);
+        }
+    }
+
     private List<Column> readMetadata(DatabaseMetaData md, String tableName) throws SQLException {
         List<Column> columns = new ArrayList<Column>();
-
-        try (ResultSet rs = md.getColumns(null, null, tableName.toUpperCase(), "%")) {
+        try (ResultSet rs = md.getColumns(null, null, tableName, "%")) {
             while(rs.next()) {
                 Column column = new Column(
                         rs.getString("COLUMN_NAME"),
@@ -54,7 +102,7 @@ public class TableSnapshot {
             tableDefs.put(tableName, columns);
         }
 
-        try (ResultSet rs = md.getPrimaryKeys(null, null, tableName.toUpperCase())) {
+        try (ResultSet rs = md.getPrimaryKeys(null, null, tableName)) {
             while(rs.next()) {
                 String pkColumn = rs.getString("COLUMN_NAME");
                 for(Column column : columns) {
@@ -117,7 +165,7 @@ public class TableSnapshot {
                 }
                 snapshotStmt.executeBatch();
             }
-            conn.commit();
+            snapshotConnection.commit();
         }
 
     }
@@ -130,15 +178,16 @@ public class TableSnapshot {
         return null;
     }
 
-    public void diffFromPrevious(String tableName) {
+    public Diff diffFromPrevious(String tableName) {
+        tableName = normalizer.normalize(tableName);
         try (Statement stmt = snapshotConnection.createStatement()) {
             String addSql = "SELECT * FROM "  + versioning.getCurrentVersion(tableName) +
                     " MINUS SELECT * FROM " + versioning.getPreviousVersion(tableName);
 
-            Diff diff = new Diff();
+            List<Column> columns = tableDefs.get(tableName);
+            Diff diff = new Diff(columns);
 
             try (ResultSet rs = stmt.executeQuery(addSql)) {
-                List<Column> columns = tableDefs.get(tableName);
                 while(rs.next()) {
                     Row row = new Row(columns);
                     for (Column column : columns) {
@@ -151,7 +200,6 @@ public class TableSnapshot {
             String delSql = "SELECT * FROM "  + versioning.getPreviousVersion(tableName) +
                     " MINUS SELECT * FROM " + versioning.getCurrentVersion(tableName);
             try (ResultSet rs = stmt.executeQuery(delSql)) {
-                List<Column> columns = tableDefs.get(tableName);
                 while(rs.next()) {
                     Row row = new Row(columns);
                     for (Column column : columns) {
@@ -165,7 +213,7 @@ public class TableSnapshot {
                     }
                 }
             }
-            System.out.println(JSON.encode(diff));
+            return diff;
 
         } catch (SQLException ex) {
             throw new IllegalStateException(ex);
@@ -174,9 +222,5 @@ public class TableSnapshot {
 
     public void setDataSource(DataSource dataSource) {
         this.dataSource = dataSource;
-    }
-
-    public void setSnapshotConnection(Connection snapshotConnection) {
-        this.snapshotConnection = snapshotConnection;
     }
 }
