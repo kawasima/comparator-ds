@@ -6,15 +6,13 @@ import org.h2.value.DataType;
 
 import javax.sql.DataSource;
 import java.sql.*;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Map;
-import java.util.TreeMap;
+import java.util.*;
 
 /**
  * @author kawasima
  */
 public class TableSnapshot {
+    private String schemaName;
     private DataSource dataSource;
     private Connection snapshotConnection;
     private Map<String, List<Column>> tableDefs = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
@@ -29,6 +27,9 @@ public class TableSnapshot {
         try (Connection conn = dataSource.getConnection()) {
             snapshotConnection = DriverManager.getConnection(url);
             DatabaseMetaData md = conn.getMetaData();
+            if (md.getURL().startsWith("jdbc:oracle:")) {
+                schemaName = md.getUserName();
+            }
             if (md.storesUpperCaseIdentifiers()) {
                 normalizer = new TableNameNormalizer() {
                     @Override public String normalize(String tableName) {
@@ -56,14 +57,19 @@ public class TableSnapshot {
     }
 
     public void take(String tableName) {
-        tableName = normalizer.normalize(tableName);
-        try (Connection conn = dataSource.getConnection()) {
-            if (versioning == null) {
-                versioning = new Versioning(snapshotConnection);
-            }
+        take(new String[]{tableName});
+    }
 
-            createTable(conn, tableName);
-            copyData(conn, tableName);
+    public void take(String[] tableNames) {
+        try (Connection conn = dataSource.getConnection()) {
+            for (String tableName : tableNames) {
+                tableName = normalizer.normalize(tableName);
+                if (versioning == null) {
+                    versioning = new Versioning(snapshotConnection);
+                }
+                createTable(conn, tableName);
+                copyData(conn, tableName);
+            }
         } catch (SQLException ex) {
             throw new IllegalStateException(ex);
         }
@@ -73,11 +79,15 @@ public class TableSnapshot {
         List<String> tables = new ArrayList<>();
 
         try (Connection conn = dataSource.getConnection()) {
-            try (ResultSet rs = conn.getMetaData().getTables(null, null, "%", new String[]{"TABLE"})) {
+            DatabaseMetaData md = conn.getMetaData();
+            try (ResultSet rs = md.getTables(null, schemaName, "%", new String[]{"TABLE"})) {
                 while(rs.next()) {
-                    tables.add(rs.getString("TABLE_NAME"));
+                    String tableName = rs.getString("TABLE_NAME");
+                    if (! tableName.contains("$"))
+                        tables.add(tableName);
                 }
             }
+            Collections.sort(tables);
             return tables;
         } catch (SQLException ex) {
             throw new IllegalStateException(ex);
@@ -85,8 +95,9 @@ public class TableSnapshot {
     }
 
     private List<Column> readMetadata(DatabaseMetaData md, String tableName) throws SQLException {
+
         List<Column> columns = new ArrayList<Column>();
-        try (ResultSet rs = md.getColumns(null, null, tableName, "%")) {
+        try (ResultSet rs = md.getColumns(null, schemaName, tableName, "%")) {
             while(rs.next()) {
                 Column column = new Column(
                         rs.getString("COLUMN_NAME"),
@@ -95,14 +106,18 @@ public class TableSnapshot {
                         rs.getInt("DECIMAL_DIGITS"),
                         -1
                 );
-                column.setAutoIncrement("YES".equals(rs.getString("IS_AUTOINCREMENT")), 1, 1);
-                column.setNullable(rs.getInt("NULLABLE") == 0);
+                try {
+                    column.setAutoIncrement("YES".equals(rs.getString("IS_AUTOINCREMENT")), 1, 1);
+                } catch (SQLException ignore) {
+                    // Oracle throws SQLException...
+                }
+                column.setNullable(rs.getInt("NULLABLE") != 0);
                 columns.add(column);
             }
             tableDefs.put(tableName, columns);
         }
 
-        try (ResultSet rs = md.getPrimaryKeys(null, null, tableName)) {
+        try (ResultSet rs = md.getPrimaryKeys(null, schemaName, tableName)) {
             while(rs.next()) {
                 String pkColumn = rs.getString("COLUMN_NAME");
                 for(Column column : columns) {
@@ -180,12 +195,21 @@ public class TableSnapshot {
 
     public Diff diffFromPrevious(String tableName) {
         tableName = normalizer.normalize(tableName);
+        List<Column> columns = tableDefs.get(tableName);
+        Diff diff = new Diff(columns);
+
         try (Statement stmt = snapshotConnection.createStatement()) {
+
+            DatabaseMetaData md = snapshotConnection.getMetaData();
+            try (ResultSet rs = md.getTables(null, null,
+                    versioning.getPreviousVersion(tableName).toUpperCase(), new String[]{"TABLE"})) {
+                if (!rs.next()) {
+                    return diff;
+                }
+            }
+
             String addSql = "SELECT * FROM "  + versioning.getCurrentVersion(tableName) +
                     " MINUS SELECT * FROM " + versioning.getPreviousVersion(tableName);
-
-            List<Column> columns = tableDefs.get(tableName);
-            Diff diff = new Diff(columns);
 
             try (ResultSet rs = stmt.executeQuery(addSql)) {
                 while(rs.next()) {
