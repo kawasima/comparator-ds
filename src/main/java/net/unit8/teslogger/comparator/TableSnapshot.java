@@ -1,6 +1,8 @@
 package net.unit8.teslogger.comparator;
 
 import org.apache.commons.lang3.StringUtils;
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
 import org.h2.table.Column;
 import org.h2.value.DataType;
 
@@ -12,10 +14,14 @@ import java.util.*;
  * @author kawasima
  */
 public class TableSnapshot {
+    private static final Log log = LogFactory.getLog(TableSnapshot.class);
     private String schemaName;
     private DataSource dataSource;
     private Connection snapshotConnection;
     private Map<String, List<Column>> tableDefs = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
+    private Map<Integer, Integer> maximumScales = new HashMap<Integer, Integer>();
+    private Map<Integer, Integer> precisions = new HashMap<Integer, Integer>();
+
     private long BULK_COUNT = 1000L;
     private TableNameNormalizer normalizer;
 
@@ -49,7 +55,14 @@ public class TableSnapshot {
                     }
                 };
             }
-
+            try (ResultSet rs = md.getTypeInfo()) {
+                while(rs.next()) {
+                    int dataType = rs.getInt("DATA_TYPE");
+                    int maximumScale = rs.getInt("MAXIMUM_SCALE");
+                    maximumScales.put(dataType, maximumScale);
+                    precisions.put(dataType, rs.getInt("PRECISION"));
+                }
+            }
         } catch (SQLException e) {
             throw new IllegalArgumentException(e);
         }
@@ -67,6 +80,7 @@ public class TableSnapshot {
                 if (versioning == null) {
                     versioning = new Versioning(snapshotConnection);
                 }
+
                 createTable(conn, tableName);
                 copyData(conn, tableName);
             }
@@ -79,15 +93,13 @@ public class TableSnapshot {
         List<String> tables = new ArrayList<>();
 
         try (Connection conn = dataSource.getConnection()) {
-            DatabaseMetaData md = conn.getMetaData();
-            try (ResultSet rs = md.getTables(null, schemaName, "%", new String[]{"TABLE"})) {
+            try (ResultSet rs = conn.getMetaData().getTables(null, schemaName, "%", new String[]{"TABLE"})) {
                 while(rs.next()) {
                     String tableName = rs.getString("TABLE_NAME");
-                    if (! tableName.contains("$"))
+                    if (!tableName.contains("$"))
                         tables.add(tableName);
                 }
             }
-            Collections.sort(tables);
             return tables;
         } catch (SQLException ex) {
             throw new IllegalStateException(ex);
@@ -95,17 +107,21 @@ public class TableSnapshot {
     }
 
     private List<Column> readMetadata(DatabaseMetaData md, String tableName) throws SQLException {
-
         List<Column> columns = new ArrayList<Column>();
         try (ResultSet rs = md.getColumns(null, schemaName, tableName, "%")) {
             while(rs.next()) {
+                int scale     = rs.getInt("COLUMN_SIZE");
+                int precision = rs.getInt("DECIMAL_DIGITS");
+
+                if (scale == 0)
+                    scale = -1;
+                if (precision < 0)
+                    precision = -1;
                 Column column = new Column(
                         rs.getString("COLUMN_NAME"),
-                        DataType.convertSQLTypeToValueType(rs.getInt("DATA_TYPE")),
-                        rs.getInt("COLUMN_SIZE"),
-                        rs.getInt("DECIMAL_DIGITS"),
-                        -1
-                );
+                        DataType.getTypeByName(rs.getString("TYPE_NAME")).type,
+                        scale, precision, -1);
+
                 try {
                     column.setAutoIncrement("YES".equals(rs.getString("IS_AUTOINCREMENT")), 1, 1);
                 } catch (SQLException ignore) {
@@ -154,6 +170,7 @@ public class TableSnapshot {
                         .append(",");
             }
             sql.append(")");
+            log.debug(sql.toString());
             stmt.executeUpdate(sql.toString());
         }
     }
@@ -195,21 +212,12 @@ public class TableSnapshot {
 
     public Diff diffFromPrevious(String tableName) {
         tableName = normalizer.normalize(tableName);
-        List<Column> columns = tableDefs.get(tableName);
-        Diff diff = new Diff(columns);
-
         try (Statement stmt = snapshotConnection.createStatement()) {
-
-            DatabaseMetaData md = snapshotConnection.getMetaData();
-            try (ResultSet rs = md.getTables(null, null,
-                    versioning.getPreviousVersion(tableName).toUpperCase(), new String[]{"TABLE"})) {
-                if (!rs.next()) {
-                    return diff;
-                }
-            }
-
             String addSql = "SELECT * FROM "  + versioning.getCurrentVersion(tableName) +
                     " MINUS SELECT * FROM " + versioning.getPreviousVersion(tableName);
+
+            List<Column> columns = tableDefs.get(tableName);
+            Diff diff = new Diff(columns);
 
             try (ResultSet rs = stmt.executeQuery(addSql)) {
                 while(rs.next()) {
@@ -241,6 +249,16 @@ public class TableSnapshot {
 
         } catch (SQLException ex) {
             throw new IllegalStateException(ex);
+        }
+    }
+
+    public void dispose() {
+        try {
+            if (snapshotConnection != null && !snapshotConnection.isClosed()) {
+                snapshotConnection.close();
+            }
+        } catch (SQLException e) {
+            throw new IllegalStateException(e);
         }
     }
 

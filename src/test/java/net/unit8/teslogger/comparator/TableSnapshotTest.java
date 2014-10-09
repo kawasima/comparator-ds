@@ -51,36 +51,38 @@ public class TableSnapshotTest {
     public void testCandidates() throws SQLException {
         TableSnapshot snapshot = new TableSnapshot(ds, "jdbc:h2:file:./target/comparator");
         System.out.println(snapshot.listCandidate());
+        snapshot.dispose();
     }
     @Test
     public void test() throws SQLException, IOException {
         try (DirectoryStream<Path> dirStream = Files.newDirectoryStream(Paths.get("./target/"), "comparator.*")) {
-            for(Path file : dirStream) {
+            for (Path file : dirStream) {
                 Files.delete(file);
             }
         }
         TableSnapshot snapshot = new TableSnapshot(ds, "jdbc:h2:file:./target/comparator");
         snapshot.setDataSource(ds);
 
-            snapshot.take("emp");
+        snapshot.take("emp");
 
-            try (Connection targetConn = ds.getConnection();
-                 PreparedStatement stmt = targetConn.prepareStatement("INSERT INTO emp(name, age) values (?,?)")) {
-                stmt.setString(1, "kawasima");
-                stmt.setInt(2, 3);
-                stmt.executeUpdate();
-            }
-            snapshot.take("emp");
-            snapshot.diffFromPrevious("emp");
+        try (Connection targetConn = ds.getConnection();
+             PreparedStatement stmt = targetConn.prepareStatement("INSERT INTO emp(name, age) values (?,?)")) {
+            stmt.setString(1, "kawasima");
+            stmt.setInt(2, 3);
+            stmt.executeUpdate();
+        }
+        snapshot.take("emp");
+        snapshot.diffFromPrevious("emp");
 
-            try (Connection targetConn = ds.getConnection();
-                 PreparedStatement stmt = targetConn.prepareStatement("UPDATE emp SET age = ? WHERE id = ?")) {
-                stmt.setInt(1, 17);
-                stmt.setLong(2, 1L);
-                stmt.executeUpdate();
-            }
+        try (Connection targetConn = ds.getConnection();
+             PreparedStatement stmt = targetConn.prepareStatement("UPDATE emp SET age = ? WHERE id = ?")) {
+            stmt.setInt(1, 17);
+            stmt.setLong(2, 1L);
+            stmt.executeUpdate();
+        }
 
-            snapshot.take("emp");
-            System.out.println(JSON.encode(snapshot.diffFromPrevious("emp")));
+        snapshot.take("emp");
+        System.out.println(JSON.encode(snapshot.diffFromPrevious("emp")));
+        snapshot.dispose();
     }
 }
