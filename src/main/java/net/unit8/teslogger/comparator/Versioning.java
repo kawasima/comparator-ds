@@ -5,7 +5,6 @@ import org.h2.util.IOUtils;
 import java.io.IOException;
 import java.io.InputStream;
 import java.sql.*;
-import java.util.UUID;
 
 /**
  * @author kawasima
@@ -18,7 +17,10 @@ public class Versioning {
         Statement stmt = null;
         try {
             stmt = conn.createStatement();
-            stmt.executeUpdate(getCreateTableSql());
+            String sqls = getCreateTableSql();
+            for (String sql : sqls.split("\\s;\\s")) {
+                stmt.execute(sql);
+            }
             conn.commit();
         } finally {
             if (stmt != null)
@@ -29,13 +31,13 @@ public class Versioning {
 
     public String getPreviousVersion(String tableName) {
         try (PreparedStatement stmt = conn.prepareStatement(
-                "SELECT id, table_name, created_at FROM versions "
+                "SELECT version_id, table_name FROM version_tables "
                         + "WHERE table_name = ? "
-                        + "ORDER BY created_at DESC")) {
+                        + "ORDER BY version_id DESC")) {
             stmt.setString(1, tableName);
             ResultSet rs = stmt.executeQuery();
             if (rs.next() && rs.next()) {
-                return tableName + "_" + rs.getLong("ID");
+                return tableName + "_" + rs.getLong("VERSION_ID");
             } else {
                 throw new SQLException("No previous version.");
             }
@@ -47,13 +49,13 @@ public class Versioning {
 
     public String getCurrentVersion(String tableName) {
         try (PreparedStatement stmt = conn.prepareStatement(
-                "SELECT id, table_name, created_at FROM versions "
+                "SELECT version_id, table_name FROM version_tables "
                         + "WHERE table_name = ? "
-                        + "ORDER BY created_at DESC")) {
+                        + "ORDER BY version_id DESC")) {
             stmt.setString(1, tableName);
             ResultSet rs = stmt.executeQuery();
             if (rs.next()) {
-                return tableName + "_" + rs.getLong("ID");
+                return tableName + "_" + rs.getLong("VERSION_ID");
             } else {
                 throw new SQLException("No current version.");
             }
@@ -62,19 +64,31 @@ public class Versioning {
         }
     }
 
-    public String getNextVersion(String tableName) {
+    public long getNextVersion(String[] tableNames) {
+        Long version = null;
+
         try (PreparedStatement stmt = conn.prepareStatement(
-                "INSERT INTO versions(table_name) "
-                        + "VALUES (?)", Statement.RETURN_GENERATED_KEYS)) {
-            stmt.setString(1, tableName);
+                "INSERT INTO versions VALUES() ",
+                Statement.RETURN_GENERATED_KEYS)) {
             stmt.executeUpdate();
             try (ResultSet rs = stmt.getGeneratedKeys()) {
                 rs.next();
-                return tableName + "_" + rs.getLong(1);
-            } finally {
-                conn.commit();
+                version = rs.getLong(1);
             }
         } catch(SQLException ex) {
+            throw new IllegalStateException(ex);
+        }
+
+        try (PreparedStatement stmt = conn.prepareStatement(
+                "INSERT INTO version_tables VALUES(?,?)")) {
+            for (String tableName : tableNames) {
+                stmt.setLong(1, version);
+                stmt.setString(2, tableName);
+                stmt.executeUpdate();
+            }
+            conn.commit();
+            return version;
+        }  catch(SQLException ex) {
             throw new IllegalStateException(ex);
         }
     }

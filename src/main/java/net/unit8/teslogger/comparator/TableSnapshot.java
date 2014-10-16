@@ -75,13 +75,15 @@ public class TableSnapshot {
 
     public void take(String[] tableNames) {
         try (Connection conn = dataSource.getConnection()) {
+            if (versioning == null) {
+                versioning = new Versioning(snapshotConnection);
+            }
+            for (int i=0; i<tableNames.length; i++) {
+                tableNames[i] = normalizer.normalize(tableNames[i]);
+            }
+            long version = versioning.getNextVersion(tableNames);
             for (String tableName : tableNames) {
-                tableName = normalizer.normalize(tableName);
-                if (versioning == null) {
-                    versioning = new Versioning(snapshotConnection);
-                }
-
-                createTable(conn, tableName);
+                createTable(conn, tableName, version);
                 copyData(conn, tableName);
             }
         } catch (SQLException ex) {
@@ -153,7 +155,7 @@ public class TableSnapshot {
             stmt.executeUpdate("DROP TABLE " + tableName);
         }
     }
-    public void createTable(Connection conn, String tableName) throws SQLException {
+    public void createTable(Connection conn, String tableName, long version) throws SQLException {
         List<Column> columns = tableDefs.get(tableName);
         if (columns == null) {
             columns = readMetadata(conn.getMetaData(), tableName);
@@ -162,7 +164,9 @@ public class TableSnapshot {
         try (Statement stmt = snapshotConnection.createStatement()) {
             StringBuilder sql = new StringBuilder();
             sql.append("CREATE TABLE ")
-                    .append(versioning.getNextVersion(tableName))
+                    .append(tableName)
+                    .append("_")
+                    .append(version)
                     .append(" (");
             for (Column column : columns) {
                 sql.append("\n")
@@ -172,6 +176,7 @@ public class TableSnapshot {
             sql.append(")");
             log.debug(sql.toString());
             stmt.executeUpdate(sql.toString());
+            conn.commit();
         }
     }
 
