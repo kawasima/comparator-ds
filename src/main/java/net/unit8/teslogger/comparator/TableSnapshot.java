@@ -176,7 +176,6 @@ public class TableSnapshot {
             sql.append(")");
             log.debug(sql.toString());
             stmt.executeUpdate(sql.toString());
-            conn.commit();
         }
     }
 
@@ -254,6 +253,12 @@ public class TableSnapshot {
 
         } catch (SQLException ex) {
             throw new IllegalStateException(ex);
+        }
+    }
+
+    public void clear() throws SQLException {
+        try (Statement stmt = snapshotConnection.createStatement()) {
+            stmt.executeUpdate("DROP ALL OBJECTS");
         }
     }
 
