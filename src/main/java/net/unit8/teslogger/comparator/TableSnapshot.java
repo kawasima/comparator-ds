@@ -119,9 +119,14 @@ public class TableSnapshot {
                     scale = -1;
                 if (precision < 0)
                     precision = -1;
+
+                int sqlType = rs.getInt("DATA_TYPE");
+
                 Column column = new Column(
                         rs.getString("COLUMN_NAME"),
-                        DataType.getTypeByName(rs.getString("TYPE_NAME")).type,
+                        sqlType == Types.OTHER ?
+                                DataType.getTypeByName(rs.getString("TYPE_NAME")).type
+                              : DataType.convertSQLTypeToValueType(sqlType),
                         scale, precision, -1);
 
                 try {
