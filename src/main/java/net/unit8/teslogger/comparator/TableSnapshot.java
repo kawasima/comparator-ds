@@ -193,10 +193,24 @@ public class TableSnapshot {
 
             try (PreparedStatement snapshotStmt = snapshotConnection.prepareStatement(sql)) {
                 int batchCount = 1;
+                ResultSetMetaData rsMeta = rs.getMetaData();
                 while(rs.next()) {
                     int i = 1;
                     for(Column column : tableDefs.get(tableName)) {
-                        snapshotStmt.setObject(i++, rs.getObject(column.getName()));
+                        Object val;
+                        switch(rsMeta.getColumnType(i)) {
+                            case Types.TIMESTAMP:
+                            case Types.DATE:
+                                val = rs.getTimestamp(column.getName());
+                                break;
+                            case Types.CLOB:
+                            case Types.NCLOB:
+                                val = rs.getString(column.getName());
+                                break;
+                            default:
+                                val = rs.getObject(column.getName());
+                        }
+                        snapshotStmt.setObject(i++, val);
                     }
                     snapshotStmt.addBatch();
 
