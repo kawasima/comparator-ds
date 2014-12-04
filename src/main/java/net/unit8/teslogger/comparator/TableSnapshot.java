@@ -1,5 +1,6 @@
 package net.unit8.teslogger.comparator;
 
+import net.arnx.jsonic.JSON;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
@@ -7,6 +8,9 @@ import org.h2.table.Column;
 import org.h2.value.DataType;
 
 import javax.sql.DataSource;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.IOException;
 import java.sql.*;
 import java.util.*;
 
@@ -18,7 +22,7 @@ public class TableSnapshot {
     private String schemaName;
     private DataSource dataSource;
     private Connection snapshotConnection;
-    private Map<String, List<Column>> tableDefs = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
+    protected Map<String, List<Column>> tableDefs = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
     private Map<Integer, Integer> maximumScales = new HashMap<Integer, Integer>();
     private Map<Integer, Integer> precisions = new HashMap<Integer, Integer>();
 
@@ -91,11 +95,11 @@ public class TableSnapshot {
         }
     }
 
-    public List<String> listCandidate() {
+    public List<String> listCandidate(String[] types) {
         List<String> tables = new ArrayList<>();
 
         try (Connection conn = dataSource.getConnection()) {
-            try (ResultSet rs = conn.getMetaData().getTables(null, schemaName, "%", new String[]{"TABLE"})) {
+            try (ResultSet rs = conn.getMetaData().getTables(null, schemaName, "%", types)) {
                 while(rs.next()) {
                     String tableName = rs.getString("TABLE_NAME");
                     if (!tableName.contains("$"))
@@ -108,7 +112,14 @@ public class TableSnapshot {
         }
     }
 
-    private List<Column> readMetadata(DatabaseMetaData md, String tableName) throws SQLException {
+    public List<String> listCandidate() {
+        return listCandidate(new String[]{"TABLE"});
+    }
+
+    protected List<Column> readMetadata(DatabaseMetaData md, String tableName) throws SQLException {
+        if (tableDefs.containsKey(tableName)) {
+            return tableDefs.get(tableName);
+        }
         List<Column> columns = new ArrayList<Column>();
         try (ResultSet rs = md.getColumns(null, schemaName, tableName, "%")) {
             while(rs.next()) {
@@ -293,5 +304,11 @@ public class TableSnapshot {
 
     public void setDataSource(DataSource dataSource) {
         this.dataSource = dataSource;
+    }
+
+    public void loadTableDefs(File cacheFile) throws IOException {
+        try (FileInputStream fis = new FileInputStream(cacheFile)) {
+            tableDefs = JSON.decode(fis);
+        }
     }
 }
