@@ -4,6 +4,7 @@ import net.arnx.jsonic.JSON;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
+import org.h2.message.DbException;
 import org.h2.table.Column;
 import org.h2.value.DataType;
 
@@ -25,6 +26,12 @@ public class TableSnapshot {
     protected Map<String, List<Column>> tableDefs = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
     private Map<Integer, Integer> maximumScales = new HashMap<Integer, Integer>();
     private Map<Integer, Integer> precisions = new HashMap<Integer, Integer>();
+
+    private static Map<String, Integer> EXTRA_TYPE_MAP = new HashMap<>();
+    static {
+        EXTRA_TYPE_MAP.put("BINARY_DOUBLE", Types.DOUBLE);
+        EXTRA_TYPE_MAP.put("BINARY_FLOAT", Types.FLOAT);
+    }
 
     private long BULK_COUNT = 1000L;
     private TableNameNormalizer normalizer;
@@ -116,6 +123,16 @@ public class TableSnapshot {
         return listCandidate(new String[]{"TABLE"});
     }
 
+    private int guessType(int sqlType, String typeName) {
+        try {
+            return sqlType == Types.OTHER ?
+                    DataType.getTypeByName(typeName).type
+                    : DataType.convertSQLTypeToValueType(sqlType);
+        } catch (DbException ex) {
+            return EXTRA_TYPE_MAP.get(typeName.toUpperCase());
+        }
+
+    }
     protected List<Column> readMetadata(DatabaseMetaData md, String tableName) throws SQLException {
         if (tableDefs.containsKey(tableName)) {
             return tableDefs.get(tableName);
@@ -133,12 +150,15 @@ public class TableSnapshot {
 
                 int sqlType = rs.getInt("DATA_TYPE");
 
-                Column column = new Column(
-                        rs.getString("COLUMN_NAME"),
-                        sqlType == Types.OTHER ?
-                                DataType.getTypeByName(rs.getString("TYPE_NAME")).type
-                              : DataType.convertSQLTypeToValueType(sqlType),
-                        scale, precision, -1);
+                Column column;
+                try {
+                    column = new Column(
+                            rs.getString("COLUMN_NAME"),
+                            guessType(sqlType, rs.getString("TYPE_NAME")),
+                            scale, precision, -1);
+                } catch (DbException cause) {
+                    throw new SQLException("unknown column type: " + sqlType + " at " + tableName + "." + rs.getString("COLUMN_NAME"), cause);
+                }
 
                 try {
                     column.setAutoIncrement("YES".equals(rs.getString("IS_AUTOINCREMENT")), 1, 1);
